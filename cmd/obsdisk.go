@@ -51,8 +51,8 @@ func main() {
 		return
 	}
 	jfs := filepath.Join(filepath.Dir(aPath), "juicefs")
-	//var _ = aPath
-	//jfs := filepath.Join("/Users/hugonglin/Downloads/juicefs-1.0.0-darwin-amd64", "juicefs")
+	// var _ = aPath
+	// jfs := filepath.Join("/Users/hugonglin/Downloads/juicefs-1.0.0-darwin-amd64", "juicefs")
 
 	var dirNeeds []string
 	dirNeeds = append(dirNeeds, workDir)
@@ -80,7 +80,9 @@ func main() {
 
 	a := app.New()
 	window := a.NewWindow("ObsDisk")
-	addWindow := a.NewWindow("new obs disk")
+	newDiskWindow := a.NewWindow("new obs disk")
+	// don't close the window really, or it can't open again
+	newDiskWindow.SetCloseIntercept(func() { newDiskWindow.Hide() })
 	window.SetMaster()
 	window.Resize(fyne.Size{Width: w, Height: h})
 
@@ -94,39 +96,38 @@ func main() {
 	bucketItem := widget.NewFormItem("Bucket", bucketItemEntry)
 
 	formSubmit := func() {
-		defer addWindow.Hide()
 		diskName := strings.TrimSpace(diskNameEntry.Text)
 		ak := strings.TrimSpace(akItemEntry.Text)
 		sk := strings.TrimSpace(skItemEntry.Text)
 		bucket := strings.TrimSpace(bucketItemEntry.Text)
 		if diskName == "" {
-			dialog.ShowError(fmt.Errorf("empty DiskName"), window)
+			dialog.ShowError(fmt.Errorf("empty DiskName"), newDiskWindow)
 			return
 		}
 		if ak == "" {
-			dialog.ShowError(fmt.Errorf("empty AccessKey"), window)
+			dialog.ShowError(fmt.Errorf("empty AccessKey"), newDiskWindow)
 			return
 		}
 		if sk == "" {
-			dialog.ShowError(fmt.Errorf("empty AccessKey Secret"), window)
+			dialog.ShowError(fmt.Errorf("empty AccessKey Secret"), newDiskWindow)
 			return
 		}
 		if bucket == "" {
-			dialog.ShowError(fmt.Errorf("empty Bucket"), window)
+			dialog.ShowError(fmt.Errorf("empty Bucket"), newDiskWindow)
 			return
 		}
 		obsType, err := parseObsTypeFromBucket(bucket)
 		if err != nil {
-			dialog.ShowError(fmt.Errorf("parse obs type from bucket failed: %s", err.Error()), window)
+			dialog.ShowError(fmt.Errorf("parse obs type from bucket failed: %s", err.Error()), newDiskWindow)
 			return
 		}
 		existed, err := diskExisted(db, diskName)
 		if err != nil {
-			dialog.ShowError(fmt.Errorf("check DiskName exist failed: %s", err.Error()), window)
+			dialog.ShowError(fmt.Errorf("check DiskName exist failed: %s", err.Error()), newDiskWindow)
 			return
 		}
 		if existed {
-			dialog.ShowError(fmt.Errorf("DiskName %s existed", diskName), window)
+			dialog.ShowError(fmt.Errorf("DiskName %s existed", diskName), newDiskWindow)
 			return
 		}
 		meta := path.Join(metasDir, diskName)
@@ -144,16 +145,16 @@ func main() {
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
 			os.Remove(meta)
-			dialog.ShowError(fmt.Errorf("err: %s", extraFatalErr(string(stderr.Bytes()))), window)
+			dialog.ShowError(fmt.Errorf("format err: %s", extraFatalErr(string(stderr.Bytes()))), newDiskWindow)
 			return
 		}
 		err = db.Create(&Vol{Name: diskName, ObsType: obsType}).Error
 		if err != nil {
 			os.Remove(meta)
-			dialog.ShowError(fmt.Errorf("err is: %s", err), window)
+			dialog.ShowError(fmt.Errorf("record disk err: %s", err), newDiskWindow)
 			return
 		}
-		dialog.ShowInformation("success", "submit success", window)
+		dialog.ShowInformation("success", "submit success", newDiskWindow)
 	}
 
 	form := &widget.Form{
@@ -261,10 +262,10 @@ func main() {
 	}()
 
 	t := widget.NewToolbar(widget.NewToolbarAction(theme.ContentAddIcon(), func() {
-		addSize := fyne.NewSize(w, h/2)
-		addWindow.Resize(addSize)
-		addWindow.SetContent(form)
-		addWindow.Show()
+		addSize := fyne.NewSize(w*0.8, h/2)
+		newDiskWindow.Resize(addSize)
+		newDiskWindow.SetContent(form)
+		newDiskWindow.Show()
 	}))
 	bars := container.NewHBox(t)
 	split := container.NewVSplit(bars, table)
