@@ -20,16 +20,9 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"github.com/glebarez/sqlite"
+	meta2 "github.com/fox_lin/obsdisk/apps/meta"
 	"github.com/sirupsen/logrus"
-	"gorm.io/gorm"
 )
-
-type Vol struct {
-	gorm.Model `json:"-"`
-	Name       string `json:"name"`
-	ObsType    string `json:"obsType"`
-}
 
 var w, h float32 = 600, 400
 var header = []string{"DiskName", "CreatTime", "ObsType", "Actions"}
@@ -43,39 +36,47 @@ func main() {
 	if strings.ToLower(currentUser.Name) == "root" {
 		logrus.Fatal("don't run as root")
 	}
-	workDir := path.Join(currentUser.HomeDir, "ObsDisk")
-
+	homeDir := currentUser.HomeDir
 	aPath, err := os.Executable()
+	if err != nil {
+		logrus.Fatal(err)
+	}
+	jfs := filepath.Join(filepath.Dir(aPath), "juicefs")
+	// var _ = aPath
+	// jfs := filepath.Join("~/Downloads/juicefs-1.0.0-darwin-amd64", "juicefs")
+
+	workDir := path.Join(homeDir, "ObsDisk")
+	iniDir := path.Join(workDir, "ini")
+	volsDir := path.Join(workDir, "vols")
+	metasDir := path.Join(workDir, "metas")
+	var dirNeeds []string
+	dirNeeds = append(dirNeeds, workDir, iniDir, volsDir, metasDir)
+	for _, dirNeed := range dirNeeds {
+		if err := ensureDir(dirNeed); err != nil {
+			logrus.Fatal(err)
+		}
+	}
+
+	meta, err := meta2.New(meta2.DbFile(path.Join(iniDir, "disks")))
+	if err != nil {
+		logrus.Fatal(err)
+	}
+
+	var data [][]string
+	data = append(data, header)
+	vols, err := meta.Disks()
 	if err != nil {
 		logrus.Error(err)
 		return
 	}
-	jfs := filepath.Join(filepath.Dir(aPath), "juicefs")
-	// var _ = aPath
-	// jfs := filepath.Join("/Users/hugonglin/Downloads/juicefs-1.0.0-darwin-amd64", "juicefs")
-
-	var dirNeeds []string
-	dirNeeds = append(dirNeeds, workDir)
-	iniDir := path.Join(workDir, "ini")
-	dirNeeds = append(dirNeeds, iniDir)
-	volsDir := path.Join(workDir, "vols")
-	dirNeeds = append(dirNeeds, volsDir)
-	metasDir := path.Join(workDir, "metas")
-	dirNeeds = append(dirNeeds, metasDir)
-	for _, dirNeed := range dirNeeds {
-		if err := ensureDir(dirNeed); err != nil {
-			logrus.Error(err)
-			return
+	for _, vol := range vols {
+		_, exist := volsMap.Load(vol.Name)
+		if exist {
+			continue
 		}
-	}
-
-	db, err := gorm.Open(sqlite.Open(path.Join(iniDir, "disks")), &gorm.Config{})
-	if err != nil {
-		return
-	}
-	err = db.Migrator().AutoMigrate(&Vol{})
-	if err != nil {
-		return
+		volsMap.Store(vol.Name, struct{}{})
+		l := []string{vol.Name, vol.CreatedAt.Format(time.RFC3339), vol.ObsType, ""}
+		data = append(data, l)
 	}
 
 	a := app.New()
@@ -94,91 +95,69 @@ func main() {
 	skItem := widget.NewFormItem("AccessKey Secret", skItemEntry)
 	bucketItemEntry := widget.NewEntry()
 	bucketItem := widget.NewFormItem("Bucket", bucketItemEntry)
-
-	formSubmit := func() {
-		diskName := strings.TrimSpace(diskNameEntry.Text)
-		ak := strings.TrimSpace(akItemEntry.Text)
-		sk := strings.TrimSpace(skItemEntry.Text)
-		bucket := strings.TrimSpace(bucketItemEntry.Text)
-		if diskName == "" {
-			dialog.ShowError(fmt.Errorf("empty DiskName"), newDiskWindow)
-			return
-		}
-		if ak == "" {
-			dialog.ShowError(fmt.Errorf("empty AccessKey"), newDiskWindow)
-			return
-		}
-		if sk == "" {
-			dialog.ShowError(fmt.Errorf("empty AccessKey Secret"), newDiskWindow)
-			return
-		}
-		if bucket == "" {
-			dialog.ShowError(fmt.Errorf("empty Bucket"), newDiskWindow)
-			return
-		}
-		obsType, err := parseObsTypeFromBucket(bucket)
-		if err != nil {
-			dialog.ShowError(fmt.Errorf("parse obs type from bucket failed: %s", err.Error()), newDiskWindow)
-			return
-		}
-		existed, err := diskExisted(db, diskName)
-		if err != nil {
-			dialog.ShowError(fmt.Errorf("check DiskName exist failed: %s", err.Error()), newDiskWindow)
-			return
-		}
-		if existed {
-			dialog.ShowError(fmt.Errorf("DiskName %s existed", diskName), newDiskWindow)
-			return
-		}
-		meta := path.Join(metasDir, diskName)
-		cmd := exec.Command(jfs,
-			"format",
-			"--trash-days", "0",
-			"--access-key", ak,
-			"--secret-key", sk,
-			"--bucket", bucket,
-			"--storage", obsType,
-			fmt.Sprintf("sqlite3://%s", meta),
-			diskName)
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			os.Remove(meta)
-			dialog.ShowError(fmt.Errorf("format err: %s", extraFatalErr(string(stderr.Bytes()))), newDiskWindow)
-			return
-		}
-		err = db.Create(&Vol{Name: diskName, ObsType: obsType}).Error
-		if err != nil {
-			os.Remove(meta)
-			dialog.ShowError(fmt.Errorf("record disk err: %s", err), newDiskWindow)
-			return
-		}
-		dialog.ShowInformation("success", "submit success", newDiskWindow)
-	}
-
 	form := &widget.Form{
-		Items:    []*widget.FormItem{diskNameItem, akItem, skItem, bucketItem},
-		OnSubmit: formSubmit,
+		Items: []*widget.FormItem{diskNameItem, akItem, skItem, bucketItem},
+		OnSubmit: func() {
+			diskName := strings.TrimSpace(diskNameEntry.Text)
+			ak := strings.TrimSpace(akItemEntry.Text)
+			sk := strings.TrimSpace(skItemEntry.Text)
+			bucket := strings.TrimSpace(bucketItemEntry.Text)
+			if diskName == "" {
+				dialog.ShowError(fmt.Errorf("empty DiskName"), newDiskWindow)
+				return
+			}
+			if ak == "" {
+				dialog.ShowError(fmt.Errorf("empty AccessKey"), newDiskWindow)
+				return
+			}
+			if sk == "" {
+				dialog.ShowError(fmt.Errorf("empty AccessKey Secret"), newDiskWindow)
+				return
+			}
+			if bucket == "" {
+				dialog.ShowError(fmt.Errorf("empty Bucket"), newDiskWindow)
+				return
+			}
+			obsType, err := parseObsTypeFromBucket(bucket)
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("parse obs type from bucket failed: %s", err.Error()), newDiskWindow)
+				return
+			}
+			existed, err := meta.DiskExisted(diskName)
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("check DiskName exist failed: %s", err.Error()), newDiskWindow)
+				return
+			}
+			if existed {
+				dialog.ShowError(fmt.Errorf("DiskName %s existed", diskName), newDiskWindow)
+				return
+			}
+			metaFile := path.Join(metasDir, diskName)
+			cmd := exec.Command(jfs,
+				"format",
+				"--trash-days", "0",
+				"--access-key", ak,
+				"--secret-key", sk,
+				"--bucket", bucket,
+				"--storage", obsType,
+				fmt.Sprintf("sqlite3://%s", meta),
+				diskName)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				_ = os.Remove(metaFile)
+				dialog.ShowError(fmt.Errorf("format err: %s", extraFatalErr(string(stderr.Bytes()))), newDiskWindow)
+				return
+			}
+			if err = meta.NewDisk(diskName, obsType); err != nil {
+				_ = os.Remove(metaFile)
+				dialog.ShowError(fmt.Errorf("record disk err: %s", err), newDiskWindow)
+				return
+			}
+			dialog.ShowInformation("success", "submit success", newDiskWindow)
+		},
 	}
-
-	var data [][]string
-	data = append(data, header)
-	vols, err := disks(db)
-	if err != nil {
-		logrus.Error(err)
-		return
-	}
-	for _, vol := range vols {
-		_, exist := volsMap.Load(vol.Name)
-		if exist {
-			continue
-		}
-		volsMap.Store(vol.Name, struct{}{})
-		l := []string{vol.Name, vol.CreatedAt.Format(time.RFC3339), vol.ObsType, ""}
-		data = append(data, l)
-	}
-
 	table := widget.NewTable(
 		func() (int, int) {
 			return len(data), len(data[0])
@@ -193,7 +172,7 @@ func main() {
 			c := o.(*fyne.Container)
 			lb := c.Objects[0].(*widget.Label)
 			toolbar := c.Objects[1].(*widget.Toolbar)
-			if i.Col == len(header)-1 {
+			if i.Col == len(header)-1 && i.Row > 0 {
 				lb.Hide()
 				toolbar.Hidden = false
 				if len(toolbar.Items) == 0 {
@@ -231,18 +210,29 @@ func main() {
 				lb.SetText(data[i.Row][i.Col])
 			}
 		})
-
 	colWidths := []float32{100, 200, 100}
 	for i, w := range colWidths {
 		table.SetColumnWidth(i, w)
 	}
+
+	t := widget.NewToolbar(widget.NewToolbarAction(theme.ContentAddIcon(), func() {
+		addSize := fyne.NewSize(w*0.8, h/2)
+		newDiskWindow.Resize(addSize)
+		newDiskWindow.SetContent(form)
+		newDiskWindow.Show()
+	}))
+	bars := container.NewHBox(t)
+	split := container.NewVSplit(bars, table)
+	split.Offset = 0.1
+	window.SetContent(split)
+	window.Show()
 
 	tk := time.NewTicker(time.Second * 1)
 	go func() {
 		for true {
 			select {
 			case <-tk.C:
-				vols, err := disks(db)
+				vols, err := meta.Disks()
 				if err != nil {
 					logrus.Error(err)
 					return
@@ -261,18 +251,6 @@ func main() {
 		}
 	}()
 
-	t := widget.NewToolbar(widget.NewToolbarAction(theme.ContentAddIcon(), func() {
-		addSize := fyne.NewSize(w*0.8, h/2)
-		newDiskWindow.Resize(addSize)
-		newDiskWindow.SetContent(form)
-		newDiskWindow.Show()
-	}))
-	bars := container.NewHBox(t)
-	split := container.NewVSplit(bars, table)
-	split.Offset = 0.1
-	window.SetContent(split)
-	window.Show()
-
 	a.Run()
 }
 
@@ -281,24 +259,6 @@ var obsSchemaMap = map[string]string{
 	"aliyuncs":      "oss",
 	"myhuaweicloud": "obs",
 	"myqcloud":      "cos",
-}
-
-func diskExisted(db *gorm.DB, diskName string) (bool, error) {
-	var nums int64
-	err := db.Table("vols").Where("name = ?", diskName).Count(&nums).Error
-	if err != nil {
-		return false, err
-	}
-	return nums > 0, nil
-}
-
-func disks(db *gorm.DB) ([]Vol, error) {
-	vols := make([]Vol, 0)
-	err := db.Table("vols").Scan(&vols).Error
-	if err != nil {
-		return nil, err
-	}
-	return vols, nil
 }
 
 func parseObsTypeFromBucket(bucket string) (string, error) {

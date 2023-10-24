@@ -5,6 +5,7 @@ go 1.19
 require (
 	fyne.io/fyne/v2 v2.3.3
 	github.com/glebarez/sqlite v1.7.0
+	github.com/sashabaranov/go-openai v1.8.0
 	github.com/sirupsen/logrus v1.8.1
 	gorm.io/gorm v1.24.6
 )
